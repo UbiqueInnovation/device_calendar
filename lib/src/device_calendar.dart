@@ -62,6 +62,25 @@ class DeviceCalendarPlugin {
     );
   }
 
+  /// Presents the platform calendar chooser and returns the selected calendar.
+  ///
+  /// Only implemented on iOS. Other platforms will return an error.
+  Future<Result<Calendar?>> chooseCalendar() async {
+    return _invokeChannelMethod(
+      ChannelConstants.methodNameChooseCalendar,
+      evaluateResponse: (rawData) {
+        if (rawData == null) {
+          return null;
+        }
+        final decoded = json.decode(rawData) as List<dynamic>;
+        if (decoded.isEmpty) {
+          return null;
+        }
+        return Calendar.fromJson(decoded.first as Map<String, dynamic>);
+      },
+    );
+  }
+
   /// Retrieves the events from the specified calendar
   ///
   /// The `calendarId` paramter is the id of the calendar that plugin will return events for

@@ -4,6 +4,7 @@ class ChannelConstants {
   static const String methodNameRequestPermissions = 'requestPermissions';
   static const String methodNameHasPermissions = 'hasPermissions';
   static const String methodNameRetrieveCalendars = 'retrieveCalendars';
+  static const String methodNameChooseCalendar = 'chooseCalendar';
   static const String methodNameRetrieveEvents = 'retrieveEvents';
   static const String methodNameDeleteEvent = 'deleteEvent';
   static const String methodNameDeleteEventInstance = 'deleteEventInstance';

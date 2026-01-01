@@ -23,7 +23,7 @@ extension String {
     }
 }
 
-public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDelegate, UINavigationControllerDelegate {
+public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDelegate, UINavigationControllerDelegate, EKCalendarChooserDelegate {
     struct DeviceCalendar: Codable {
         let id: String
         let name: String
@@ -114,6 +114,7 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
     let deleteEventMethod = "deleteEvent"
     let deleteEventInstanceMethod = "deleteEventInstance"
     let showEventModalMethod = "showiOSEventModal"
+    let showCalendarChooserMethod = "chooseCalendar"
     let updateCalendarColor = "updateCalendarColor"
     let calendarIdArgument = "calendarId"
     let startDateArgument = "startDate"
@@ -156,6 +157,7 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
     let validFrequencyTypes = [EKRecurrenceFrequency.daily, EKRecurrenceFrequency.weekly, EKRecurrenceFrequency.monthly, EKRecurrenceFrequency.yearly]
     
     var flutterResult : FlutterResult?
+    private var selectedCalendar: EKCalendar?
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(name: channelName, binaryMessenger: registrar.messenger())
@@ -186,6 +188,9 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
         case showEventModalMethod:
             self.flutterResult = result
             showEventModal(call, result)
+        case showCalendarChooserMethod:
+            self.flutterResult = result
+            showCalendarChooser(result)
         case updateCalendarColor:
             updateCalendarColor(call, result)
         default:
@@ -283,22 +288,46 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
     private func retrieveCalendars(_ result: @escaping FlutterResult) {
         checkPermissionsThenExecute(permissionsGrantedAction: {
             let ekCalendars = self.eventStore.calendars(for: .event)
-            let defaultCalendar = self.eventStore.defaultCalendarForNewEvents
-            var calendars = [DeviceCalendar]()
-            for ekCalendar in ekCalendars {
-                let calendar = DeviceCalendar(
-                    id: ekCalendar.calendarIdentifier,
-                    name: ekCalendar.title,
-                    isReadOnly: !ekCalendar.allowsContentModifications,
-                    isDefault: defaultCalendar?.calendarIdentifier == ekCalendar.calendarIdentifier,
-                    color: UIColor(cgColor: ekCalendar.cgColor).rgb()!,
-                    accountName: ekCalendar.source.title,
-                    accountType: getAccountType(ekCalendar.source.sourceType))
-                calendars.append(calendar)
-            }
-
+            let calendars = convertToDeviceCalendars(ekCalendars)
             self.encodeJsonAndFinish(codable: calendars, result: result)
         }, result: result)
+    }
+
+    private func showCalendarChooser(_ result: @escaping FlutterResult) {
+        checkPermissionsThenExecute(permissionsGrantedAction: {
+            let chooser = EKCalendarChooser(
+                selectionStyle: .single,
+                displayStyle: .writableCalendarsOnly,
+                entityType: .event,
+                eventStore: eventStore)
+            chooser.showsDoneButton = true
+            chooser.showsCancelButton = true
+            chooser.delegate = self
+            if let selected = selectedCalendar {
+                chooser.selectedCalendars = Set([selected])
+            }
+            let navigationController = UINavigationController(rootViewController: chooser)
+            let flutterViewController = getTopMostViewController()
+            flutterViewController.present(navigationController, animated: true, completion: nil)
+        }, result: result)
+    }
+
+    private func convertToDeviceCalendars(_ ekCalendars: [EKCalendar]) -> [DeviceCalendar] {
+        let defaultCalendar = self.eventStore.defaultCalendarForNewEvents
+        var calendars = [DeviceCalendar]()
+        for ekCalendar in ekCalendars {
+            let calendar = DeviceCalendar(
+                id: ekCalendar.calendarIdentifier,
+                name: ekCalendar.title,
+                isReadOnly: !ekCalendar.allowsContentModifications,
+                isDefault: defaultCalendar?.calendarIdentifier == ekCalendar.calendarIdentifier,
+                color: UIColor(cgColor: ekCalendar.cgColor).rgb()!,
+                accountName: ekCalendar.source.title,
+                accountType: getAccountType(ekCalendar.source.sourceType))
+            calendars.append(calendar)
+        }
+
+        return calendars
     }
 
     private func deleteCalendar(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
@@ -851,13 +880,12 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
             let description = arguments[self.eventDescriptionArgument] as? String
             let location = arguments[self.eventLocationArgument] as? String
             let url = arguments[self.eventURLArgument] as? String
-            let ekCalendar = self.eventStore.calendar(withIdentifier: calendarId)
-            if (ekCalendar == nil) {
+            guard let ekCalendar = selectedCalendar ?? self.eventStore.calendar(withIdentifier: calendarId) ?? self.eventStore.defaultCalendarForNewEvents else {
                 self.finishWithCalendarNotFoundError(result: result, calendarId: calendarId)
                 return
             }
 
-            if !(ekCalendar!.allowsContentModifications) {
+            if !ekCalendar.allowsContentModifications {
                 self.finishWithCalendarReadOnlyError(result: result, calendarId: calendarId)
                 return
             }
@@ -884,7 +912,7 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
                 ekEvent!.timeZone = timeZone
             }
 
-            ekEvent!.calendar = ekCalendar!
+            ekEvent!.calendar = ekCalendar
             ekEvent!.location = location
 
             // Create and add URL object only when if the input string is not empty or nil
@@ -1086,28 +1114,26 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
         self.finishWithUnauthorizedError(result: result)
     }
 
-    private func requestPermissions(_ completion: @escaping (Bool) -> Void) {
+    private func requestPermissions(_ result: @escaping FlutterResult) {
         if hasEventPermissions() {
-            completion(true)
+            result(true)
             return
         }
-        if #available(iOS 17, *) {
-            eventStore.requestFullAccessToEvents {
-                (accessGranted: Bool, _: Error?) in
-                completion(accessGranted)
+        if #available(iOS 17.0, *) {
+            eventStore.requestWriteOnlyAccessToEvents { success, _ in
+                result(success)
             }
         } else {
-            eventStore.requestAccess(to: .event, completion: {
-                (accessGranted: Bool, _: Error?) in
-                completion(accessGranted)
-            })
+            eventStore.requestAccess(to: .event) { accessGranted, _ in
+                result(accessGranted)
+            }
         }
     }
 
     private func hasEventPermissions() -> Bool {
         let status = EKEventStore.authorizationStatus(for: .event)
-        if #available(iOS 17, *) {
-            return status == EKAuthorizationStatus.fullAccess
+        if #available(iOS 17.0, *) {
+            return status == EKAuthorizationStatus.writeOnly || status == EKAuthorizationStatus.fullAccess
         } else {
             return status == EKAuthorizationStatus.authorized
         }
@@ -1168,4 +1194,28 @@ extension UIColor {
         return nil
     }
 
+}
+
+extension SwiftDeviceCalendarPlugin {
+    public func calendarChooserDidFinish(_ calendarChooser: EKCalendarChooser) {
+        calendarChooser.dismiss(animated: true, completion: nil)
+
+        if let flutterResult = flutterResult {
+            let calendars = convertToDeviceCalendars(Array(calendarChooser.selectedCalendars))
+            selectedCalendar = calendarChooser.selectedCalendars.first
+            self.flutterResult = nil
+            self.encodeJsonAndFinish(codable: calendars, result: flutterResult)
+        }
+    }
+
+    public func calendarChooserSelectionDidChange(_ calendarChooser: EKCalendarChooser) {
+    }
+
+    public func calendarChooserDidCancel(_ calendarChooser: EKCalendarChooser) {
+        calendarChooser.dismiss(animated: true, completion: nil)
+        if let flutterResult = flutterResult {
+            self.flutterResult = nil
+            flutterResult(nil)
+        }
+    }
 }
